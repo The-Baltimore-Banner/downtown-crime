@@ -28,9 +28,12 @@ Put CSV in the data folder:
 [Baltimore Police Part 1 Crimes Database](https://data.baltimorecity.gov/datasets/part-1-crime-data-/explore)
 
 
-Put shapefile in shapefiles folder:
+Put neighborhoods in data folder:
 [Baltimore Neighborhoods](https://data.baltimorecity.gov/datasets/neighborhood-1/explore?location=39.284818%2C-76.620500%2C11.86)
 [Baltimore Police Districts](https://data.baltimorecity.gov/datasets/956e52eb7abb4787abd7386e8efd600b_0/about)
+
+Put police districts in data folder:
+[Baltimore Police Districts](https://data.baltimorecity.gov/maps/956e52eb7abb4787abd7386e8efd600b/about)
 
 
 <a id="method"></a>
