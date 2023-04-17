@@ -1,0 +1,760 @@
+---
+title: "fact-check"
+output: html_document
+date: "2023-04-17"
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(lwgeom)
+library(janitor)
+library(lubridate)
+library(sf)
+library(mapview)
+library(tidycensus)
+options(digits=3)
+options(scipen=999)
+'%notin%' <- Negate('%in%')
+census_api_key("a52431e412be5ff6c652a021ed9d0903ce4c33ee")
+
+#does a standard group_by and count() with percentage
+grouper <- function(input_df, group_by_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = n()) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+}
+
+#group/counts every column in input dataframe
+group_count <- function(input_df, group_column_name='n()', state_filter=NA, start_col = 1){
+  column_names <- colnames(input_df)
+  if(!is.na(state_filter)){
+    input_df <- input_df %>%
+      filter(state == state_filter)
+  }
+  for (column in column_names[start_col:length(column_names)]){
+    output <- grouper(input_df, column, group_column_name)
+    print(output)
+  }
+}
+
+grouper_sum <- function(input_df, group_by_column, sum_column, new_column_name = "n()"){
+  output_df <- input_df %>%
+    group_by(.data[[group_by_column]]) %>%
+    summarise(temp_count = sum(.data[[sum_column]])) %>%
+    mutate(percent = temp_count/sum(temp_count)*100) %>%
+    arrange(desc(percent)) %>%
+    rename(!!new_column_name := temp_count)
+  return(output_df)
+  
+}
+
+#lowers case of every character column in a dataframe
+lower_df <- function(input_df){
+  names <- colnames(input_df)
+  output_df <- input_df
+  names <- colnames(output_df)
+  for (name in names){
+    if (is.character(output_df[[name]])){
+      output_df[[name]] <- tolower(output_df[[name]])
+      #print('yes')
+    } else {
+      output_df[[name]] <- output_df[[name]]
+      #print('no')
+    }
+  }
+  return(output_df)
+}
+
+
+```
+
+
+Note: The crime and victims database is too large to save to GitHub. To execute the code, please download the last [Baltimore Police Part 1 Crimes Database](https://data.baltimorecity.gov/datasets/part-1-crime-data-/explore) and save it in the data folder.
+
+## IMPORT 
+
+```{r}
+
+victims <- read_csv('data/Part_1_Crime_Data.csv') %>%
+  #cleaning column names
+  clean_names() %>%
+  #lowering text in df
+  lower_df() %>%
+  #converting to lubridate
+  mutate(crime_date_time = ymd_hms(crime_date_time))  %>%
+  #making year month hour columns
+  mutate(year = year(crime_date_time),
+         month = month(crime_date_time),
+         hour = hour(crime_date_time),
+         date = as_date(crime_date_time)) %>%
+  #removing lat/long because there are multiples and ethnicity because it is unreliable
+  select(-row_id, -latitude, -longitude, -ethnicity) %>%#, -shape) %>%
+  #filtering for year
+  #filter(year >= 2011) %>%
+  #splitting geo location
+  separate(geo_location, c("latitude", "longitude"), ',') %>%
+  #removing parenthesis
+  mutate(latitude = gsub('\\(', '', latitude),
+         longitude = gsub('\\)', '', longitude)) %>%
+  #modifying ages that can't be or are very unlikely to be real
+  mutate(age = case_when(
+    age > 0 & age < 100 ~ age,
+    TRUE ~ NA_real_
+  )) %>%
+  #classifying age ranges
+  mutate(age_range = case_when(
+    age < 18 & age > 0 ~ "juvenile",
+    age >= 18 & age <= 25 ~ "18 to 25",
+    age >= 26 & age <= 34 ~ "26 to 34",
+    age >= 35 & age <= 50 ~ "35 to 50",
+    age > 50 & age < 75 ~ "51 to 74",
+    age >= 75 & age < 85 ~ "75 to 84",
+    age >= 85 ~ "85 to 100",
+    TRUE ~ "NA"
+  )) %>%
+  #classifying time of shooting
+  mutate(time_range = case_when(
+    hour <= 3 ~ "early morning",
+    hour < 12 & hour > 3 ~ "morning",
+    hour >= 12 & hour < 15 ~ "early afternoon",
+    hour >= 13 & hour < 17 ~ "after school",
+    hour >= 17 & hour < 20 ~ "evening",
+    hour >= 20 ~ "night"
+  ))  %>%
+  #labeling quarter by month
+    mutate(quarter = case_when(
+    month %in% c(1,2,3) ~ 1,
+    month %in% c(4,5,6) ~ 2,
+    month %in% c(7,8,9) ~ 3,
+    month %in% c(10,11,12) ~ 4
+  )) %>%
+  #labeling end date of each quarter for viz purposes
+  mutate(quarter_date = case_when(
+    quarter == 1 ~ ymd(paste0(year, "-3-31")),
+    quarter == 2 ~ ymd(paste0(year, "-6-30")),
+    quarter == 3 ~ ymd(paste0(year, "-9-30")),
+    quarter == 4 ~ ymd(paste0(year, "-12-31"))
+  )) %>%
+  filter(year >= 2015) %>%
+  mutate(district = case_when(
+    district == "sd5" ~ "southern",
+    TRUE ~ district
+  ))
+
+crimes <- victims %>%
+  #grouping by distinct instance characteristics to counts crime incidents instead of victions
+  group_by(crime_date_time, location, district, neighborhood, description, premise, year, month, date, time_range, quarter, latitude, longitude) %>%
+  #summarising characteristics of crimes victims
+  summarise(victims = n(),
+            juvenile_victims = sum(age_range == "juvenile"),
+            homicides = sum(description == "homicide"),
+            juvenile_homicides = sum(description == "homicide" & age_range == "juvenile"),
+            average_age = mean(age, na.rm = TRUE),
+            #description = paste0(unique(description), collapse = ", "),
+            age_of_victims = paste0(age, collapse = ", "),
+            black_victims = sum(race == "black_or_african_american"),
+            white_victims = sum(race == "white"),
+            asian_victims = sum(race == "asian")
+            ) %>%
+  ungroup() %>%
+  mutate(row_number = row_number())
+
+sf_crimes <- crimes %>%
+   filter(!is.na(latitude),
+          !is.na(longitude),
+          latitude != 0,
+          longitude != 0,
+          latitude != '',
+          longitude != '') %>%
+   st_as_sf(coords = c("longitude", "latitude"),
+            crs = 4326)
+
+```
+
+# IMPORT AND JOIN
+
+```{r}
+
+## IMPORTS
+
+downtown <- st_read("data/dma_boundaries/dma-boundaries-again.shp") %>%
+  st_transform(crs = 4326) %>%
+  mutate(downtown_area = st_area(.)) %>%
+  st_make_valid()
+
+#parcels <- read_sf("data/Real_Property_Information/Real_Property_Information.shp") %>%
+#  clean_names() %>%
+#  lower_df() %>%
+#  st_transform(crs= 4326) %>%
+#  st_make_valid()
+
+#downtown_blocks <- st_intersection(parcels, downtown) %>%
+#  filter(block %notin% c('0492', '0480'))  %>%
+#  group_by(block) %>%
+#  summarise(geometry = st_union(geometry))
+
+#write_sf(downtown_blocks, "data/output/downtown-blocks.geojson")
+
+downtown_blocks <- st_read("data/output/downtown-blocks.geojson")
+
+neighborhoods <- read_sf("data/neighborhood/neighborhood.shp") %>%
+  clean_names() %>%
+  lower_df() %>%
+  select(name, geometry) %>%
+  st_transform(crs=4326) %>%
+  mutate(neighborhood_area = st_area(.))
+
+#downtown_neighborhoods <- st_intersection(neighborhoods, downtown) %>%
+#  mutate(neighborhood_overlap = st_area(.),
+#         neighborhood_share_of_downtown = as.numeric((neighborhood_overlap/downtown_area)*100),
+#         share_of_neighborhood_in_downtown = as.numeric((neighborhood_overlap/neighborhood_area)*100)
+#         ) %>%
+#  filter(share_of_neighborhood_in_downtown > 2)
+  
+#write_sf(downtown_neighborhoods, "data/output/downtown-neighborhoods.geojson")
+
+downtown_neighborhoods <- st_read("data/output/downtown-neighborhoods.geojson")
+
+downtown_crimes <- st_intersection(sf_crimes %>%
+                                     filter(neighborhood %in% downtown_neighborhoods$name)
+                                     , downtown)
+
+districts <- st_read("data/police_districts/Police_Districts.shp") %>%
+  st_transform(crs=4326)
+
+mapview(downtown_crimes)
+
+
+```
+
+### CENSUS
+
+```{r}
+
+library(tigris)
+
+acs_vars <- load_variables(2020, "acs5", cache = TRUE)
+
+### list years we want, map through to get all at once! 
+years <- lst(2015, 2016, 2017, 2018, 2019, 2020, 2021)
+
+all_years <- map(
+  years,
+  ~ get_acs(
+    geography = "tract",
+    variables = "B03002_001",
+    state = "MD",
+    year = .x,
+    survey = "acs5",
+    geometry = TRUE
+    )
+  ) %>% 
+  map2(years, ~ mutate(.x, id = .y))
+
+df_years <- reduce(all_years, bind_rows) %>%
+  as.data.frame()
+
+### duplicating pop estimates from 2022 and then binding rows so we can compute a rough crime rate for 2022
+placeholder_2022 <- df_years %>%
+  filter(id == 2021) %>%
+  mutate(
+    id = 2022
+  )
+
+### clean up 
+population <- df_years %>%
+  bind_rows(placeholder_2022) %>%
+  rename(year = id) %>%
+  clean_names() %>%
+  separate(name, into=c("tract","name","state"), sep=",") %>%
+  mutate(
+      state = str_trim(state,side="both"),
+      name = str_trim(name,side="both")
+  ) %>%
+  filter(name == "Baltimore city") %>%
+  st_as_sf() %>%
+  erase_water(area_threshold = 0.9, year = 2015) %>%
+  st_transform(crs = 4326)
+
+## makes it work
+sf_use_s2(FALSE)
+
+#### old geometries -- use this for everything except for more recent census tracts
+x2015_tracts <- population %>%
+  filter(year == 2015) %>%
+  st_transform(crs = 4326) %>%
+  mutate(tract_area = st_area(.)) %>%
+  st_make_valid()
+
+### 2020 geoms
+x2020_tracts <- population %>%
+  filter(year == 2020) %>%
+  st_transform(crs = 4326) %>%
+  mutate(tract_area = st_area(.)) %>%
+  st_make_valid()
+
+
+mapview(downtown) + mapview(x2015_tracts)
+```
+
+# GREATER DOWNTOWN ANALYSIS
+
+```{r}
+
+x2015_tracts_intersect <- st_intersection(x2015_tracts, downtown) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    #percent_downtown = as.numeric((tract_intersect_area/downtown_area)*100),
+    percent_downtown_in_tract = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  st_transform(crs = 4326) %>%
+  clean_names()
+
+### new tracts intersect
+x2020_tracts_intersect <- st_intersection(x2020_tracts, downtown) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    #percent_downtown = as.numeric((tract_intersect_area/downtown_area)*100),
+    percent_downtown_in_tract = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  st_transform(crs = 4326) %>%
+  clean_names()
+
+### mapview
+  mapview(x2015_tracts) +
+    mapview(x2015_tracts_intersect)
+
+```
+
+
+```{r}
+
+### old tracts data
+before_2020 <- population %>%
+  filter(year != 2020, 
+         year != 2021,
+         year != 2022) %>%
+  st_drop_geometry() %>%
+  inner_join(x2015_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_downtown_in_tract/100) * estimate
+  ) %>%
+  group_by(name.x, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+
+### new tracts data 
+after_2020 <- population %>%
+  filter(year == 2020 | 
+         year == 2021 |
+         year == 2022) %>%
+  st_drop_geometry() %>%
+  inner_join(x2020_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_downtown_in_tract/100) * estimate
+  ) %>%
+  group_by(name.x, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+ 
+
+### bind rows
+downtown_population <- bind_rows(before_2020, after_2020) %>%
+  ungroup() %>%
+  select(-name.x) %>%
+  rename(population = sum_pop) %>%
+  mutate(population = as.numeric(population),
+         pop_in_10k = population/10000,
+         pop_in_1k = population/1000)
+
+#write_csv(downtown_population, "data/output/downtown-population.csv")
+
+```
+
+```{r}
+
+downtown_crime_rates <- downtown_crimes %>%
+  st_drop_geometry() %>%
+  select(-downtown_area) %>%
+  group_by(year, description) %>%
+  summarise(incidents = n()) %>%
+  pivot_wider(values_from = incidents, names_from = description) %>%
+  clean_names() %>%
+  filter(year != 2023)
+
+downtown_crime_rates[is.na(downtown_crime_rates)] <- 0
+
+downtown_crime_rates <- downtown_crime_rates %>%
+  full_join(downtown_population) %>%
+  mutate(
+    agg_assault_per_1k = agg_assault/pop_in_1k,
+    arson_per_1k = arson/pop_in_1k,
+    auto_theft_per_1k = auto_theft/pop_in_1k,
+    burglary_per_1k = burglary/pop_in_1k,
+    common_assault_per_1k = common_assault/pop_in_1k,
+    homicide_per_1k = homicide/pop_in_1k,
+    larceny_per_1k = larceny/pop_in_1k,
+    larceny_from_auto_per_1k = larceny_from_auto/pop_in_1k,
+    rape_per_1k = rape/pop_in_1k,
+    robbery_per_1k = robbery/pop_in_1k,
+    robbery_carjacking_per_1k = robbery_carjacking/pop_in_1k,
+    robbery_commercial_per_1k = robbery_commercial/pop_in_1k,
+    shooting_per_1k = shooting/pop_in_1k,
+  ) %>%
+  select(contains("per_1k"))
+
+write_csv(downtown_crime_rates, "data/output/downtown-crime-rates.csv")
+
+```
+
+
+## POLICE DISTRICT ANALYSIS
+
+```{r}
+
+x2015_tracts_intersect <- st_intersection(x2015_tracts, districts %>%
+                                            mutate(district_area = st_area(.))) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    #percent_downtown = as.numeric((tract_intersect_area/downtown_area)*100),
+    percent_neighborhood_overlap = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  st_transform(crs = 4326) %>%
+  clean_names()
+
+### new tracts intersect
+x2020_tracts_intersect <- st_intersection(x2020_tracts, districts %>%
+                                            mutate(district_area = st_area(.))) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    percent_neighborhood_overlap = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  clean_names()
+
+
+mapview(x2020_tracts_intersect)
+```
+
+
+```{r}
+
+
+
+### old tracts data
+before_2020 <- population %>%
+  filter(year != 2020, 
+         year != 2021,
+         year != 2022) %>%
+  st_drop_geometry() %>%
+  full_join(x2015_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_neighborhood_overlap/100) * estimate
+  ) %>%
+  group_by(dist_name, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+
+### new tracts data 
+after_2020 <- population %>%
+  filter(year == 2020 | 
+         year == 2021 |
+         year == 2022) %>%
+  st_drop_geometry() %>%
+  inner_join(x2020_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_neighborhood_overlap/100) * estimate
+  ) %>%
+  group_by(dist_name, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+ 
+
+### bind rows
+district_populations <- bind_rows(before_2020, after_2020) %>%
+  ungroup() %>%
+  #select(-name.x) %>%
+  rename(population = sum_pop) %>%
+  mutate(population = as.numeric(population),
+         pop_in_10k = population/10000,
+         pop_in_1k = population/1000)
+
+```
+
+
+```{r}
+
+district_crimes_per_1k <- crimes %>%
+  group_by(year, district, description) %>%
+  summarise(incidents = n()) %>%
+  pivot_wider(values_from = incidents, names_from = description) %>%
+  clean_names() %>%
+  filter(year != 2023,
+         !is.na(district),
+         district != "sd5") %>%
+  mutate(district = case_when(
+    district == "northeast" ~ paste0(district, "ern"),
+    district == "southeast" ~ paste0(district, "ern"),
+    district == "northwEst" ~ paste0(district, "ern"),
+    district == "southwest" ~ paste0(district, "ern"),
+    TRUE ~ district
+  ))
+
+district_crimes_per_1k[is.na(district_crimes_per_1k)] <- 0
+
+district_crimes_per_1k <- district_crimes_per_1k %>%
+  full_join(district_populations %>%
+              rename(district = dist_name) %>%
+              lower_df()) %>%
+  mutate(
+    agg_assault_per_1k = agg_assault/pop_in_1k,
+    arson_per_1k = arson/pop_in_1k,
+    auto_theft_per_1k = auto_theft/pop_in_1k,
+    burglary_per_1k = burglary/pop_in_1k,
+    common_assault_per_1k = common_assault/pop_in_1k,
+    homicide_per_1k = homicide/pop_in_1k,
+    larceny_per_1k = larceny/pop_in_1k,
+    larceny_from_auto_per_1k = larceny_from_auto/pop_in_1k,
+    rape_per_1k = rape/pop_in_1k,
+    robbery_per_1k = robbery/pop_in_1k,
+    robbery_carjacking_per_1k = robbery_carjacking/pop_in_1k,
+    robbery_commercial_per_1k = robbery_commercial/pop_in_1k,
+    shooting_per_1k = shooting/pop_in_1k,
+  ) %>%
+  select(contains("per_1k"))
+
+#write_csv(district_crimes_per_1k, "data/output/district-crimes-per-10k.csv")
+```
+
+
+## BY NEIGHBORHOOD
+
+```{r}
+
+x2015_tracts_intersect <- st_intersection(x2015_tracts, neighborhoods %>%
+                                            mutate(neighborhood_area = st_area(.))) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    #percent_downtown = as.numeric((tract_intersect_area/downtown_area)*100),
+    percent_neighborhood_overlap = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  st_transform(crs = 4326) %>%
+  clean_names()
+
+### new tracts intersect
+x2020_tracts_intersect <- st_intersection(x2020_tracts, neighborhoods %>%
+                                            mutate(neighborhood_area = st_area(.))) %>%
+  mutate(tract_intersect_area = st_area(.)) %>%
+  mutate(
+    percent_neighborhood_overlap = as.numeric((tract_intersect_area/tract_area)*100)
+  ) %>%
+  clean_names()
+
+
+mapview(x2020_tracts_intersect)
+```
+
+
+```{r}
+
+### old tracts data
+before_2020 <- population %>%
+  filter(year != 2020, 
+         year != 2021,
+         year != 2022) %>%
+  st_drop_geometry() %>%
+  full_join(x2015_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_neighborhood_overlap/100) * estimate
+  ) %>%
+  group_by(name_1, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+
+### new tracts data 
+after_2020 <- population %>%
+  filter(year == 2020 | 
+         year == 2021 |
+         year == 2022) %>%
+  st_drop_geometry() %>%
+  inner_join(x2020_tracts_intersect, by=c("geoid")) %>%
+  rename(
+    estimate = estimate.x,
+    year = year.x
+  ) %>%
+  mutate(
+    pop_estimate = (percent_neighborhood_overlap/100) * estimate
+  ) %>%
+  group_by(name_1, year) %>%
+  summarize(
+    sum_pop = sum(pop_estimate)
+  )
+ 
+
+### bind rows
+neighborhood_populations <- bind_rows(before_2020, after_2020) %>%
+  ungroup() %>%
+  #select(-name.x) %>%
+  rename(population = sum_pop) %>%
+  mutate(population = as.numeric(population),
+         pop_in_10k = population/10000,
+         pop_in_1k = population/1000) %>%
+  rename(neighborhood = name_1)
+
+```
+
+
+```{r}
+
+neighborhood_crimes_per_1k <- crimes %>%
+  group_by(year, neighborhood, description) %>%
+  summarise(incidents = n()) %>%
+  pivot_wider(values_from = incidents, names_from = description) %>%
+  clean_names() %>%
+  filter(year != 2023,
+         !is.na(neighborhood)) 
+
+neighborhood_crimes_per_1k[is.na(neighborhood_crimes_per_1k)] <- 0
+
+neighborhood_crimes_per_1k <- neighborhood_crimes_per_1k %>%
+  full_join(neighborhood_populations) %>%
+  mutate(
+    agg_assault_per_1k = agg_assault/pop_in_1k,
+    arson_per_1k = arson/pop_in_1k,
+    auto_theft_per_1k = auto_theft/pop_in_1k,
+    burglary_per_1k = burglary/pop_in_1k,
+    common_assault_per_1k = common_assault/pop_in_1k,
+    homicide_per_1k = homicide/pop_in_1k,
+    larceny_per_1k = larceny/pop_in_1k,
+    larceny_from_auto_per_1k = larceny_from_auto/pop_in_1k,
+    rape_per_1k = rape/pop_in_1k,
+    robbery_per_1k = robbery/pop_in_1k,
+    robbery_carjacking_per_1k = robbery_carjacking/pop_in_1k,
+    robbery_commercial_per_1k = robbery_commercial/pop_in_1k,
+    shooting_per_1k = shooting/pop_in_1k,
+  ) %>%
+  select(contains("per_1k"))
+
+write_csv(neighborhood_crimes_per_1k, "data/output/neighborhood-crimes-per-10k.csv")
+```
+
+
+#COMBINING
+
+```{r}
+
+temp1 <- neighborhood_crimes_per_1k %>%
+  rename(place = neighborhood) %>%
+  mutate(place_type = "neighborhood") 
+
+temp2 <- district_crimes_per_1k %>%
+  rename(place = district) %>%
+  mutate(place_type = "police district")
+
+temp3 <- downtown_crime_rates %>%
+  mutate(place = "downtown") %>%
+  mutate(place_type = "downtown")
+
+output <- temp1 %>%
+  bind_rows(temp2) %>%
+  bind_rows(temp3) %>%
+  relocate(year, place, place_type) %>%
+  mutate_if(is.numeric, round, digits = 2)
+
+master_crime_rates_per_1k <- output %>%
+  pivot_longer(cols = contains("per_1k"), values_to = "incidents_per_1k") %>%
+  rename(crime = name) %>%
+  mutate(crime = gsub("_", " ", crime),
+         crime = gsub("per 1k", "", crime)) %>%
+  mutate(place = str_to_title(paste0(place_type, " - ", place))) %>%
+  select(-place_type) %>%
+  ungroup() %>%
+  glimpse() %>%
+  mutate(crime = str_to_title(crime)) %>%
+  pivot_wider(values_from = incidents_per_1k, names_from = crime)
+
+
+```
+
+
+#TESTING GEOGRAPHIC JOIN ERRORS
+
+```{r}
+
+compare_join_and_open_baltimore <- function(input_neighborhoods, shape=neighborhoods){
+  
+  if(deparse(substitute(neighborhoods)) == "neighborhoods"){
+    
+    shape <- neighborhoods %>%
+      filter(name %in% input_neighborhoods)
+    
+  } else {
+    
+    #pass
+    
+  }
+  
+  test_intersection <- st_intersection(shape, sf_crimes)
+  
+  missing_crimes <- sf_crimes %>%
+    filter(neighborhood %in% input_neighborhoods) %>%
+    filter(row_number %notin% test_intersection$row_number)
+  
+  print(missing_crimes %>%
+          st_drop_geometry())
+  
+  print(mapview(missing_crimes %>%
+                  group_by(geometry) %>%
+                  summarise(crimes_at_point = n())) +
+    mapview(neighborhoods %>%
+              filter(name %in% input_neighborhoods)))
+  
+}
+
+compare_join_and_open_baltimore(c("fells point"))
+
+```
+
+
+#Fact Check
+
+```{r}
+
+# This analysis is easier to fact check using the visualizations in the story. If you want to use the output of this code, I would suggest your favorite graphing software to add and remove rates at your preference.
+
+```
+
+
+
