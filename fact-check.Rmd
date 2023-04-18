@@ -19,7 +19,7 @@ library(tidycensus)
 options(digits=3)
 options(scipen=999)
 '%notin%' <- Negate('%in%')
-census_api_key("a52431e412be5ff6c652a021ed9d0903ce4c33ee")
+census_api_key("insert api key")
 
 #does a standard group_by and count() with percentage
 grouper <- function(input_df, group_by_column, new_column_name = "n()"){
